@@ -4,7 +4,10 @@
   "description": "Desktop app to log into your Telegram account and download media from your chats.",
   "main": "src/main/main.js",
   "private": true,
-  "author": "Mehdi",
+  "author": {
+    "name": "Mehdi",
+    "email": "mehdi.dalvand@nbe-group.com"
+  },
   "scripts": {
     "start": "electron .",
     "dist:mac": "electron-builder --mac",
@@ -60,6 +63,8 @@
     "linux": {
       "icon": "build/icon.png",
       "category": "Utility",
+      "desktopName": "telegram-media-downloader.desktop",
+      "syncDesktopName": true,
       "target": [
         { "target": "AppImage", "arch": ["x64"] },
         { "target": "deb", "arch": ["x64"] },

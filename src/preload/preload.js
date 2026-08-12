@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('tg', {
   getAppConfig: () => ipcRenderer.invoke('appConfig:get'),
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
+  openTelegramMessage: (chatId, chatType, messageId) =>
+    ipcRenderer.invoke('telegram:openMessage', { chatId, chatType, messageId }),
   setAppConfig: (config) => ipcRenderer.invoke('appConfig:set', config),
   restoreSession: () => ipcRenderer.invoke('session:restore'),
   sendCode: (phone) => ipcRenderer.invoke('login:sendCode', phone),
@@ -19,4 +21,5 @@ contextBridge.exposeInMainWorld('tg', {
   onDownloadProgress: (cb) =>
     ipcRenderer.on('download:progress', (_e, data) => cb(data)),
   onDownloadDone: (cb) => ipcRenderer.on('download:done', (_e, data) => cb(data)),
+  onMediaThumbnail: (cb) => ipcRenderer.on('media:thumbnail', (_e, data) => cb(data)),
 });

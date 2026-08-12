@@ -11,6 +11,15 @@
   <div class="spinner-wrap"><div class="spinner"></div></div>
 </section>
 
+<section id="screen-connection-error" class="screen hidden">
+  <div class="card">
+    <h1>Can't reach Telegram</h1>
+    <p id="connection-error-message" class="hint"></p>
+    <button id="btn-retry-connection">Retry now</button>
+    <button id="btn-fix-settings" class="link-btn" type="button">Fix settings</button>
+  </div>
+</section>
+
 <section id="screen-setup" class="screen hidden">
   <div class="card">
     <h1>App setup</h1>
@@ -61,6 +70,7 @@
       <button id="btn-verify-password">Verify</button>
     </div>
     <p id="login-error" class="error hidden"></p>
+    <button id="btn-login-open-settings" class="link-btn" type="button">⚙ Fix app / proxy settings</button>
   </div>
 </section>
 

@@ -1,5 +1,6 @@
 const screens = {
   loading: document.getElementById('screen-loading'),
+  connectionError: document.getElementById('screen-connection-error'),
   setup: document.getElementById('screen-setup'),
   login: document.getElementById('screen-login'),
   chats: document.getElementById('screen-chats'),
@@ -16,8 +17,8 @@ const ERROR_MESSAGES = {
   wrong_code: 'Wrong code, try again.',
   wrong_password: 'Wrong 2FA password, try again.',
   flood_wait: 'Too many attempts — Telegram asked us to wait before retrying.',
-  proxy_unreachable: "Can't reach Telegram — check your proxy is running on 127.0.0.1:10801.",
-  unknown: 'Something went wrong. Please try again.',
+  connection_error: 'Connection error — could not reach Telegram. Check your proxy settings or network connection and try again.',
+  unknown: 'Something went wrong — this is often a connection issue. Please try again.',
 };
 
 function showLoginError(code) {
@@ -33,7 +34,11 @@ document.getElementById('btn-open-mytelegram').addEventListener('click', () => {
   window.tg.openExternal('https://my.telegram.org/apps');
 });
 
-document.getElementById('btn-open-settings').addEventListener('click', async () => {
+let originalApiId = '';
+let originalApiHash = '';
+
+async function openSettingsScreen(returnScreen, { loggedIn }) {
+  clearConnectionRetryTimer();
   const { config } = await window.tg.getAppConfig();
   if (config) {
     document.getElementById('setup-api-id').value = config.apiId;
@@ -41,12 +46,26 @@ document.getElementById('btn-open-settings').addEventListener('click', async () 
     document.getElementById('setup-proxy-type').value = config.proxyType || 'socks5';
     document.getElementById('setup-proxy-host').value = config.proxyEnabled ? config.proxyHost : '';
     document.getElementById('setup-proxy-port').value = config.proxyEnabled ? config.proxyPort : '';
+    originalApiId = String(config.apiId);
+    originalApiHash = String(config.apiHash);
   }
   document.getElementById('setup-error').classList.add('hidden');
   document.getElementById('btn-cancel-setup').classList.remove('hidden');
-  settingsReturnScreen = 'chats';
-  editingConfigWhileLoggedIn = true;
+  settingsReturnScreen = returnScreen;
+  editingConfigWhileLoggedIn = loggedIn;
   showScreen('setup');
+}
+
+document.getElementById('btn-open-settings').addEventListener('click', () => {
+  openSettingsScreen('chats', { loggedIn: true });
+});
+
+document.getElementById('btn-login-open-settings').addEventListener('click', () => {
+  openSettingsScreen('login', { loggedIn: false });
+});
+
+document.getElementById('btn-fix-settings').addEventListener('click', () => {
+  openSettingsScreen('login', { loggedIn: false });
 });
 
 document.getElementById('btn-save-setup').addEventListener('click', async () => {
@@ -83,12 +102,17 @@ document.getElementById('btn-save-setup').addEventListener('click', async () => 
     return;
   }
   document.getElementById('btn-cancel-setup').classList.add('hidden');
-  if (editingConfigWhileLoggedIn) {
-    editingConfigWhileLoggedIn = false;
+  // Only the API identity (api_id/api_hash) invalidates the session — proxy
+  // changes are just a transport detail and must never force a logout.
+  const apiIdentityChanged =
+    editingConfigWhileLoggedIn && (apiId !== originalApiId || apiHash !== originalApiHash);
+  editingConfigWhileLoggedIn = false;
+  if (apiIdentityChanged) {
     await window.tg.logout();
     showScreen('login');
   } else {
-    showScreen(settingsReturnScreen);
+    connectionRetryCount = 0;
+    await attemptConnect();
   }
 });
 
@@ -150,21 +174,23 @@ async function loadChats() {
   list.innerHTML = '<li>Loading...</li>';
   const res = await window.tg.listChats();
   if (!res.ok) {
-    list.innerHTML = `<li>${ERROR_MESSAGES[res.error] || ERROR_MESSAGES.unknown}</li>`;
+    const message = ERROR_MESSAGES[res.error] || ERROR_MESSAGES.unknown;
+    list.innerHTML = `<li>${escapeHtml(message)} <button class="retry-btn" id="btn-retry-chats">Retry</button></li>`;
+    document.getElementById('btn-retry-chats').addEventListener('click', loadChats);
     return;
   }
-  renderChatList(res.chats);
+  allChats = res.chats;
+  renderChatList(allChats);
 }
 
 let allChats = [];
 
 function renderChatList(chats) {
-  allChats = chats;
   const list = document.getElementById('chat-list');
   list.innerHTML = '';
   chats.forEach((chat) => {
     const li = document.createElement('li');
-    li.innerHTML = `<span class="name">${chat.name}</span><span class="meta">${chat.type}</span>`;
+    li.innerHTML = `<span class="name">${escapeHtml(chat.name)}</span><span class="meta">${chat.type}</span>`;
     li.addEventListener('click', () => openChat(chat));
     list.appendChild(li);
   });
@@ -256,6 +282,7 @@ function appendMediaItems(items) {
     loadedItems.set(item.id, item);
     const li = document.createElement('li');
     li.dataset.id = item.id;
+    li.title = 'Click to open this message in Telegram';
     const thumbHtml = item.thumbnail
       ? `<img class="thumb" src="${item.thumbnail}" alt="" />`
       : `<span class="thumb thumb-placeholder">${item.type[0].toUpperCase()}</span>`;
@@ -270,15 +297,40 @@ function appendMediaItems(items) {
         <span class="meta">${item.type} · ${formatSize(item.size)}</span>
         ${captionHtml}
       </span>
+      <button class="btn-download-item" type="button">Download</button>
     `;
     li.querySelector('.item-select').addEventListener('change', (e) => {
       if (e.target.checked) selected.add(item.id);
       else selected.delete(item.id);
       updateSelectionSummary();
     });
+    li.querySelector('.btn-download-item').addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const folder = await getOrPickDownloadFolder();
+      if (!folder) return;
+      startDownloads([item.id], folder);
+    });
+    li.addEventListener('click', (e) => {
+      if (e.target.closest('.item-select') || e.target.closest('.btn-download-item')) return;
+      window.tg.openTelegramMessage(currentChat.id, currentChat.type, item.id);
+    });
     list.appendChild(li);
   });
 }
+
+window.tg.onMediaThumbnail(({ id, thumbnail }) => {
+  const item = loadedItems.get(id);
+  if (item) item.thumbnail = thumbnail;
+  const li = document.querySelector(`#media-list li[data-id="${id}"]`);
+  if (!li) return;
+  const placeholder = li.querySelector('.thumb');
+  if (!placeholder) return;
+  const img = document.createElement('img');
+  img.className = 'thumb';
+  img.alt = '';
+  img.src = thumbnail;
+  placeholder.replaceWith(img);
+});
 
 document.getElementById('screen-media').addEventListener('scroll', (e) => {
   const el = e.target;
@@ -368,24 +420,43 @@ document.getElementById('btn-close-downloads').addEventListener('click', () => {
   showScreen('media');
 });
 
-// ---- Startup ----
+// ---- Startup / connection handling ----
+//
+// Retrying is manual-only, on purpose: no auto-retry timer, no polling.
+// The user clicks "Retry now" when they want to try again — nothing here
+// re-triggers itself.
+
+function clearConnectionRetryTimer() {
+  // No-op kept as a stable extension point; settings screens call this
+  // before navigating away so nothing schedules a retry behind their back.
+}
+
+async function attemptConnect() {
+  showScreen('loading');
+  const res = await window.tg.restoreSession();
+  if (res.loggedIn) {
+    await enterApp();
+    return;
+  }
+  if (res.reason === 'connection_failed') {
+    document.getElementById('connection-error-message').textContent =
+      ERROR_MESSAGES[res.error] || ERROR_MESSAGES.unknown;
+    showScreen('connectionError');
+    return;
+  }
+  showScreen('login');
+}
+
+document.getElementById('btn-retry-connection').addEventListener('click', () => {
+  connectionRetryCount = 0;
+  attemptConnect();
+});
 
 (async () => {
-  const { configured, config } = await window.tg.getAppConfig();
+  const { configured } = await window.tg.getAppConfig();
   if (!configured) {
     showScreen('setup');
     return;
   }
-  if (config) {
-    document.getElementById('setup-api-id').value = config.apiId;
-    document.getElementById('setup-api-hash').value = config.apiHash;
-    document.getElementById('setup-proxy-host').value = config.proxyHost;
-    document.getElementById('setup-proxy-port').value = config.proxyPort;
-  }
-  const res = await window.tg.restoreSession();
-  if (res.loggedIn) {
-    await enterApp();
-  } else {
-    showScreen('login');
-  }
+  await attemptConnect();
 })();

@@ -41,8 +41,10 @@
       "src/**/*",
       "package.json"
     ],
+    "afterSign": "build/afterSign.js",
     "mac": {
       "icon": "build/icon.icns",
+      "identity": null,
       "category": "public.app-category.utilities",
       "target": [
         { "target": "dmg", "arch": ["x64", "arm64"] },

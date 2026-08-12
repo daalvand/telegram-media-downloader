@@ -8,6 +8,19 @@ let mainWindow;
 let pendingPhone = null;
 let pendingPhoneCodeHash = null;
 
+// GramJS runs an internal ping/update loop as a fire-and-forget promise
+// (TelegramClient.js calls `_updateLoop(this)` without awaiting or catching
+// it). If the connection drops mid-loop, that rejection is unhandled, and
+// Node's default behavior for an unhandled rejection is to crash the whole
+// process. These handlers are the safety net that keeps the app alive
+// instead of dying every time the network blips.
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1100,
@@ -27,14 +40,30 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
+const CONNECTION_ERROR_PATTERNS = [
+  'ECONNREFUSED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EPIPE',
+  'timed out',
+  'timeout',
+  'not connected',
+  'connection closed',
+  'socksclienterror',
+  'proxy connection',
+  'disconnected',
+  'econnaborted',
+];
+
 function errCode(err) {
-  const msg = err?.errorMessage || err?.message || String(err);
-  if (msg.includes('PHONE_CODE_INVALID')) return 'wrong_code';
-  if (msg.includes('PASSWORD_HASH_INVALID')) return 'wrong_password';
-  if (msg.includes('FLOOD_WAIT')) return 'flood_wait';
-  if (msg.includes('ECONNREFUSED') || msg.includes('ETIMEDOUT') || msg.includes('ENOTFOUND')) {
-    return 'proxy_unreachable';
-  }
+  const msg = (err?.errorMessage || err?.message || String(err) || '').toLowerCase();
+  if (msg.includes('phone_code_invalid')) return 'wrong_code';
+  if (msg.includes('password_hash_invalid')) return 'wrong_password';
+  if (msg.includes('flood_wait')) return 'flood_wait';
+  if (CONNECTION_ERROR_PATTERNS.some((p) => msg.includes(p))) return 'connection_error';
   return 'unknown';
 }
 
@@ -44,6 +73,27 @@ ipcMain.handle('shell:openExternal', (_e, url) => {
   if (ALLOWED_EXTERNAL_LINKS.has(url)) shell.openExternal(url);
 });
 
+function buildTelegramMessageUrl(chatId, chatType, messageId) {
+  const id = String(chatId);
+  if (!/^-?\d+$/.test(id) || !Number.isInteger(messageId) || messageId <= 0) return null;
+  if (chatType === 'user') {
+    return `tg://openmessage?user_id=${id}&message_id=${messageId}`;
+  }
+  if (chatType === 'channel') {
+    const internalId = id.replace(/^-100/, '');
+    if (!/^\d+$/.test(internalId)) return null;
+    return `tg://privatepost?channel=${internalId}&post=${messageId}`;
+  }
+  const positiveId = Math.abs(Number(id));
+  return `tg://openmessage?chat_id=${positiveId}&message_id=${messageId}`;
+}
+
+ipcMain.handle('telegram:openMessage', (_e, { chatId, chatType, messageId }) => {
+  const url = buildTelegramMessageUrl(chatId, chatType, messageId);
+  if (url) shell.openExternal(url);
+  return { ok: !!url };
+});
+
 ipcMain.handle('appConfig:get', () => {
   return { configured: appConfig.isConfigured(), config: appConfig.get() };
 });
@@ -51,6 +101,9 @@ ipcMain.handle('appConfig:get', () => {
 ipcMain.handle('appConfig:set', (_e, { apiId, apiHash, proxyEnabled, proxyType, proxyHost, proxyPort }) => {
   try {
     const saved = appConfig.set({ apiId, apiHash, proxyEnabled, proxyType, proxyHost, proxyPort });
+    // The GramJS client is built once from the config it saw at construction
+    // time; force a rebuild so changed proxy/API settings actually take effect.
+    tg.resetClient();
     return { ok: true, config: saved };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -59,10 +112,14 @@ ipcMain.handle('appConfig:set', (_e, { apiId, apiHash, proxyEnabled, proxyType, 
 
 ipcMain.handle('session:restore', async () => {
   try {
-    const loggedIn = await tg.restoreSession();
-    return { loggedIn };
+    const result = await tg.restoreSession();
+    if (result.loggedIn) return { loggedIn: true };
+    if (result.reason === 'connection_failed') {
+      return { loggedIn: false, reason: 'connection_failed', error: errCode(result.error || {}) };
+    }
+    return { loggedIn: false, reason: 'no_session' };
   } catch (err) {
-    return { loggedIn: false, error: errCode(err) };
+    return { loggedIn: false, reason: 'connection_failed', error: errCode(err) };
   }
 });
 
@@ -109,7 +166,9 @@ ipcMain.handle('chats:list', async () => {
 
 ipcMain.handle('media:list', async (_e, { chatId, filter, offsetId }) => {
   try {
-    const result = await tg.listMediaBatch(chatId, filter, offsetId);
+    const result = await tg.listMediaBatch(chatId, filter, offsetId, (id, thumbnail) => {
+      mainWindow.webContents.send('media:thumbnail', { id, thumbnail });
+    });
     return { ok: true, ...result };
   } catch (err) {
     return { ok: false, error: errCode(err) };

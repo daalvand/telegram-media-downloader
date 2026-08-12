@@ -56,6 +56,29 @@ push a `v*` tag, or via manual "Run workflow" dispatch, and attaches all the
 resulting installers to a GitHub Release.
 
 Builds are unsigned (no Apple Developer ID / Windows code-signing
-certificate configured), so macOS/Windows may show an "unidentified
-developer" warning on first launch — this is expected for a personal/unsigned
-build.
+certificate configured — that costs $99/year and wasn't set up for this
+project).
+
+### macOS: "is damaged and can't be opened"
+
+Because the app isn't notarized by Apple, macOS Gatekeeper blocks it after
+it's downloaded from the internet (the download itself sets a "quarantine"
+flag, which is what actually triggers the block — not a real corruption).
+Ad-hoc signing the build helps for local transfers (AirDrop, USB, LAN) but
+does **not** satisfy Gatekeeper for a quarantined download; only Apple's own
+notarization does, which requires a paid Developer ID.
+
+**Fix (one-time, per machine):** open Terminal and run:
+
+```bash
+xattr -cr "/Applications/Telegram Media Downloader.app"
+```
+
+Then open the app normally. Alternatively: right-click the app → "Open" →
+confirm in the dialog (works on most macOS versions, though Sequoia removed
+this bypass for fully unsigned apps — use the Terminal command in that case).
+
+### Windows: "Windows protected your PC" (SmartScreen)
+
+Same root cause (no code-signing certificate). Click **"More info" → "Run
+anyway"** to launch it.

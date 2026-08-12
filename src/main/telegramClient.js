@@ -1,6 +1,7 @@
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
 const { Api } = require('telegram');
+const bigInt = require('big-integer');
 const path = require('path');
 const fs = require('fs');
 const { safeStorage, app } = require('electron');
@@ -31,6 +32,10 @@ function clearSession() {
 
 let client = null;
 
+function resetClient() {
+  client = null;
+}
+
 function getClient() {
   if (client) return client;
   const cfg = appConfig.get();
@@ -38,7 +43,10 @@ function getClient() {
     throw new Error('App is not configured yet (missing api_id/api_hash)');
   }
   const session = new StringSession(loadSession());
-  const options = { connectionRetries: 5 };
+  // Keep GramJS's own internal retry count low — our caller (renderer's
+  // attemptConnect) already retries with its own backoff on top of this, so
+  // a high value here just multiplies the wait before the UI can react.
+  const options = { connectionRetries: 1, retryDelay: 1000 };
   if (cfg.proxyEnabled) {
     options.proxy = {
       socksType: cfg.proxyType === 'socks4' ? 4 : 5,
@@ -51,22 +59,29 @@ function getClient() {
 }
 
 async function restoreSession() {
-  const c = getClient();
   const existing = loadSession();
-  if (!existing) return false;
+  if (!existing) return { loggedIn: false, reason: 'no_session' };
+  const c = getClient();
   try {
-    await c.connect();
+    // client.connect() resolves to `false` on failure instead of throwing —
+    // calling getMe() afterward without checking this would hang forever
+    // waiting for a response over a connection that was never established.
+    const connected = await c.connect();
+    if (!connected) {
+      return { loggedIn: false, reason: 'connection_failed', error: new Error('Connection failed') };
+    }
     const me = await c.getMe();
-    return !!me;
-  } catch {
-    return false;
+    return me ? { loggedIn: true } : { loggedIn: false, reason: 'connection_failed' };
+  } catch (err) {
+    return { loggedIn: false, reason: 'connection_failed', error: err };
   }
 }
 
 async function sendCode(phone) {
   const c = getClient();
   const cfg = appConfig.get();
-  await c.connect();
+  const connected = await c.connect();
+  if (!connected) throw new Error('Connection failed');
   const result = await c.sendCode(
     { apiId: cfg.apiId, apiHash: cfg.apiHash },
     phone
@@ -202,7 +217,7 @@ const NO_THUMB_TYPES = new Set(['voice']);
 async function getThumbnailDataUri(c, message, type) {
   if (NO_THUMB_TYPES.has(type)) return null;
   try {
-    const buf = await c.downloadMedia(message, { thumb: -1 });
+    const buf = await c.downloadMedia(message, { thumb: 0 });
     if (!buf || !buf.length) return null;
     return `data:${sniffImageMime(buf)};base64,${buf.toString('base64')}`;
   } catch {
@@ -210,37 +225,131 @@ async function getThumbnailDataUri(c, message, type) {
   }
 }
 
-async function listMediaBatch(chatId, filterKey, offsetId) {
+const THUMB_CONCURRENCY = 4;
+
+function fetchThumbnailsInBackground(c, messages, onThumbnail) {
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < messages.length) {
+      const m = messages[nextIndex++];
+      const type = classify(m);
+      if (!type) continue;
+      const thumbnail = await getThumbnailDataUri(c, m, type);
+      if (thumbnail) onThumbnail(m.id, thumbnail);
+    }
+  }
+  Promise.all(Array.from({ length: THUMB_CONCURRENCY }, worker)).catch(() => {});
+}
+
+function toMediaItem(m, type) {
+  const filename = filenameFor(m, type);
+  const size = m.document?.size ? Number(m.document.size) : null;
+  const caption = m.message ? m.message.slice(0, 140) : '';
+  return {
+    id: m.id,
+    type,
+    filename,
+    size,
+    date: m.date ? m.date * 1000 : null,
+    caption,
+    thumbnail: null,
+  };
+}
+
+const TARGET_PAGE_SIZE = 50;
+const RAW_SCAN_PAGE_SIZE = 100;
+const MAX_RAW_PAGES_PER_CALL = 10;
+
+async function listMediaBatch(chatId, filterKey, offsetId, onThumbnail) {
   const c = getClient();
   const filterClass = MEDIA_FILTERS[filterKey];
-  const params = { limit: 50, offsetId: offsetId || 0 };
-  if (filterClass) params.filter = new filterClass({});
+  let currentOffset = offsetId || 0;
+  const mediaMessages = [];
+  let done = false;
 
-  const messages = await c.getMessages(chatId, params);
-  const items = (
-    await Promise.all(
-      messages.map(async (m) => {
-        const type = classify(m);
-        if (!type) return null;
-        const filename = filenameFor(m, type);
-        const size = m.document?.size ? Number(m.document.size) : null;
-        const caption = m.message ? m.message.slice(0, 140) : '';
-        const thumbnail = await getThumbnailDataUri(c, m, type);
-        return {
-          id: m.id,
-          type,
-          filename,
-          size,
-          date: m.date ? m.date * 1000 : null,
-          caption,
-          thumbnail,
-        };
-      })
-    )
-  ).filter(Boolean);
+  if (filterClass) {
+    const raw = await c.getMessages(chatId, {
+      limit: TARGET_PAGE_SIZE,
+      offsetId: currentOffset,
+      filter: new filterClass({}),
+    });
+    mediaMessages.push(...raw);
+    currentOffset = raw.length ? raw[raw.length - 1].id : currentOffset;
+    done = raw.length < TARGET_PAGE_SIZE;
+  } else {
+    // No server-side filter for "any media type" exists, so scan raw history
+    // pages (which include plain text messages) until we've gathered a full
+    // page of media items, instead of giving up after a single raw page.
+    for (let page = 0; page < MAX_RAW_PAGES_PER_CALL; page++) {
+      const raw = await c.getMessages(chatId, {
+        limit: RAW_SCAN_PAGE_SIZE,
+        offsetId: currentOffset,
+      });
+      if (!raw.length) {
+        done = true;
+        break;
+      }
+      currentOffset = raw[raw.length - 1].id;
+      for (const m of raw) {
+        if (classify(m)) mediaMessages.push(m);
+      }
+      if (raw.length < RAW_SCAN_PAGE_SIZE) {
+        done = true;
+        break;
+      }
+      if (mediaMessages.length >= TARGET_PAGE_SIZE) break;
+    }
+  }
 
-  const lastId = messages.length ? messages[messages.length - 1].id : null;
-  return { items, done: messages.length < 50, nextOffsetId: lastId };
+  const items = mediaMessages.map((m) => toMediaItem(m, classify(m)));
+
+  if (onThumbnail) fetchThumbnailsInBackground(c, mediaMessages, onThumbnail);
+
+  return { items, done, nextOffsetId: currentOffset };
+}
+
+function largestPhotoSize(photo) {
+  const candidates = (photo.sizes || []).filter(
+    (s) => 'type' in s && !(s instanceof Api.PhotoStrippedSize) && !(s instanceof Api.PhotoPathSize)
+  );
+  let best = null;
+  for (const s of candidates) {
+    const size = s instanceof Api.PhotoSizeProgressive ? Math.max(...s.sizes) : s.size;
+    if (!best || size > best.size) best = { photoSize: s, size };
+  }
+  return best;
+}
+
+function resumableFileLocation(message) {
+  if (message.document) {
+    const doc = message.document;
+    return {
+      fileLocation: new Api.InputDocumentFileLocation({
+        id: doc.id,
+        accessHash: doc.accessHash,
+        fileReference: doc.fileReference,
+        thumbSize: '',
+      }),
+      totalSize: bigInt(doc.size),
+      dcId: doc.dcId,
+    };
+  }
+  if (message.photo) {
+    const photo = message.photo;
+    const largest = largestPhotoSize(photo);
+    if (!largest) return null;
+    return {
+      fileLocation: new Api.InputPhotoFileLocation({
+        id: photo.id,
+        accessHash: photo.accessHash,
+        fileReference: photo.fileReference,
+        thumbSize: largest.photoSize.type,
+      }),
+      totalSize: bigInt(largest.size),
+      dcId: photo.dcId,
+    };
+  }
+  return null;
 }
 
 async function downloadOne(chatId, messageId, destFolder, onProgress) {
@@ -252,17 +361,60 @@ async function downloadOne(chatId, messageId, destFolder, onProgress) {
   const type = classify(message);
   const filename = filenameFor(message, type);
   const destPath = path.join(destFolder, filename);
+  const partPath = `${destPath}.part`;
 
-  const buffer = await c.downloadMedia(message, {
-    progressCallback: (received, total) => {
-      if (total) onProgress(Math.round((Number(received) / Number(total)) * 100));
-    },
-  });
-  fs.writeFileSync(destPath, buffer);
+  const resumable = resumableFileLocation(message);
+  if (resumable && fs.existsSync(destPath) && fs.statSync(destPath).size === Number(resumable.totalSize)) {
+    onProgress(100);
+    return destPath;
+  }
+  if (!resumable) {
+    // Fallback for media types with no resumable file location (rare) —
+    // downloads in one shot, no resume support.
+    const buffer = await c.downloadMedia(message, {
+      progressCallback: (received, total) => {
+        if (total) onProgress(Math.round((Number(received) / Number(total)) * 100));
+      },
+    });
+    fs.writeFileSync(destPath, buffer);
+    return destPath;
+  }
+
+  const { fileLocation, totalSize, dcId } = resumable;
+  let existingSize = fs.existsSync(partPath) ? fs.statSync(partPath).size : 0;
+  if (existingSize > Number(totalSize)) existingSize = 0; // stale/corrupt partial, restart
+
+  if (existingSize === Number(totalSize)) {
+    fs.renameSync(partPath, destPath);
+    return destPath;
+  }
+
+  const writeStream = fs.createWriteStream(partPath, { flags: 'a' });
+  let received = existingSize;
+  try {
+    for await (const chunk of c.iterDownload({
+      file: fileLocation,
+      offset: bigInt(existingSize),
+      fileSize: totalSize,
+      dcId,
+      requestSize: 512 * 1024,
+    })) {
+      await new Promise((resolve, reject) => {
+        writeStream.write(chunk, (err) => (err ? reject(err) : resolve()));
+      });
+      received += chunk.length;
+      onProgress(Math.round((received / Number(totalSize)) * 100));
+    }
+  } finally {
+    await new Promise((resolve) => writeStream.end(resolve));
+  }
+
+  fs.renameSync(partPath, destPath);
   return destPath;
 }
 
 module.exports = {
+  resetClient,
   restoreSession,
   sendCode,
   verifyCode,

@@ -63,8 +63,6 @@
     "linux": {
       "icon": "build/icon.png",
       "category": "Utility",
-      "desktopName": "telegram-media-downloader.desktop",
-      "syncDesktopName": true,
       "target": [
         { "target": "AppImage", "arch": ["x64"] },
         { "target": "deb", "arch": ["x64"] },

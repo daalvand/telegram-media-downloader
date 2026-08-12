@@ -361,15 +361,16 @@ function updateSelectionSummary() {
 
 // ---- Downloads ----
 
+async function getOrPickDownloadFolder() {
+  // Always ask, every time — no remembered default (by explicit request).
+  const res = await window.tg.chooseFolder();
+  return res.ok ? res.folder : null;
+}
+
 document.getElementById('btn-download-selected').addEventListener('click', async () => {
   if (!selected.size) return;
-  let settings = await window.tg.getSettings();
-  let folder = settings.downloadFolder;
-  if (!folder) {
-    const res = await window.tg.chooseFolder();
-    if (!res.ok) return;
-    folder = res.folder;
-  }
+  const folder = await getOrPickDownloadFolder();
+  if (!folder) return;
   startDownloads(Array.from(selected), folder);
 });
 

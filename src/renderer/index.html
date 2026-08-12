@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Telegram Media Downloader</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<section id="screen-loading" class="screen">
+  <div class="spinner-wrap"><div class="spinner"></div></div>
+</section>
+
+<section id="screen-setup" class="screen hidden">
+  <div class="card">
+    <h1>App setup</h1>
+    <div class="hint">
+      <p>You need a free api_id / api_hash pair from Telegram before logging in:</p>
+      <ol>
+        <li>Click the button below, log in with your Telegram account.</li>
+        <li>Fill the short "Create application" form (any name/description is fine).</li>
+        <li>Copy the <b>api_id</b> and <b>api_hash</b> shown and paste them below.</li>
+      </ol>
+    </div>
+    <button id="btn-open-mytelegram" class="link-btn" type="button">Open my.telegram.org/apps</button>
+    <label>api_id</label>
+    <input id="setup-api-id" type="text" placeholder="123456" />
+    <label>api_hash</label>
+    <input id="setup-api-hash" type="text" placeholder="abcdef0123456789..." />
+    <label>Proxy type</label>
+    <select id="setup-proxy-type">
+      <option value="socks5">SOCKS5</option>
+      <option value="socks4">SOCKS4</option>
+    </select>
+    <label>Proxy host <span class="hint-inline">(leave blank for no proxy)</span></label>
+    <input id="setup-proxy-host" type="text" placeholder="e.g. 127.0.0.1" />
+    <label>Proxy port</label>
+    <input id="setup-proxy-port" type="text" placeholder="e.g. 10801" />
+    <button id="btn-save-setup">Save &amp; continue</button>
+    <button id="btn-cancel-setup" class="link-btn hidden" type="button">Cancel</button>
+    <p id="setup-error" class="error hidden"></p>
+  </div>
+</section>
+
+<section id="screen-login" class="screen hidden">
+  <div class="card">
+    <h1>Telegram Media Downloader</h1>
+    <div id="login-step-phone">
+      <label>Phone number (with country code)</label>
+      <input id="phone" type="text" placeholder="+15551234567" />
+      <button id="btn-send-code">Send code</button>
+    </div>
+    <div id="login-step-code" class="hidden">
+      <label>Code sent to your Telegram</label>
+      <input id="code" type="text" placeholder="12345" />
+      <button id="btn-verify-code">Verify</button>
+    </div>
+    <div id="login-step-password" class="hidden">
+      <label>Two-factor password</label>
+      <input id="password" type="password" />
+      <button id="btn-verify-password">Verify</button>
+    </div>
+    <p id="login-error" class="error hidden"></p>
+  </div>
+</section>
+
+<section id="screen-chats" class="screen hidden">
+  <header class="topbar">
+    <h2>Chats</h2>
+    <input id="chat-search" placeholder="Search chats..." />
+    <button id="btn-open-settings" title="Settings">&#9881;</button>
+    <button id="btn-logout">Log out</button>
+  </header>
+  <ul id="chat-list" class="list"></ul>
+</section>
+
+<section id="screen-media" class="screen hidden">
+  <header class="topbar">
+    <button id="btn-back-to-chats">&larr; Chats</button>
+    <h2 id="media-chat-name"></h2>
+    <div id="filter-chips" class="chips">
+      <button class="chip active" data-filter="">All</button>
+      <button class="chip" data-filter="photo">Photos</button>
+      <button class="chip" data-filter="video">Videos</button>
+      <button class="chip" data-filter="gif">GIFs</button>
+      <button class="chip" data-filter="voice">Voice</button>
+      <button class="chip" data-filter="video_note">Video notes</button>
+      <button class="chip" data-filter="document">Documents</button>
+    </div>
+  </header>
+  <div class="toolbar">
+    <label><input type="checkbox" id="select-all" /> Select all loaded</label>
+    <span id="selection-summary">0 selected</span>
+    <button id="btn-download-selected">Download selected</button>
+  </div>
+  <ul id="media-list" class="list"></ul>
+  <p id="media-status" class="status"></p>
+</section>
+
+<section id="screen-downloads" class="screen hidden">
+  <header class="topbar">
+    <h2>Downloads</h2>
+    <button id="btn-close-downloads">Done</button>
+  </header>
+  <ul id="download-list" class="list"></ul>
+</section>
+
+<script src="renderer.js"></script>
+</body>
+</html>
